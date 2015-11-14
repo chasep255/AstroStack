@@ -1,2 +1,2 @@
 # AstroStack
-Astrophotography Stacking / Alignmnet Software
+Astrophotography Stacking / Alignment Software
