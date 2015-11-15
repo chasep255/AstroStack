@@ -13,6 +13,7 @@
 #include <unistd.h>
 #include <omp.h>
 
+//Some useful macros
 #define max(a, b) ((a) > (b) ? (a) : (b))
 #define min(a, b) ((a) < (b) ? (a) : (b))
 #define abs(a) ((a) >= 0 ? (a) : -(a))
@@ -24,6 +25,7 @@
 
 #define SUCCESS 1
 #define FAILURE 0
+
 
 unsigned long gcd_ui(unsigned long x, unsigned long y)
 {
@@ -43,6 +45,7 @@ unsigned long gcd_ui(unsigned long x, unsigned long y)
     return x;
 }
 
+//binomial coefficients used to compute memory requirements for triangle space
 unsigned long binomial(unsigned long n, unsigned long k)
 {
     unsigned long d, r = 1;
@@ -62,47 +65,101 @@ unsigned long binomial(unsigned long n, unsigned long k)
     return r;
 }
 
+//16 bit pixel element type
 typedef uint16_t quantum_t;
 
 #define QUANTUM_MAX (0xffffL)
 #define QUANTUM_MIN 0
+//clamps values to allowed pixel range 0 - 65535
 #define clampq(q) clamp(q, QUANTUM_MIN, QUANTUM_MAX)
 
+//compare function used to qsort quantum
 int quantum_compare(const void* a, const void* b);
+//selects the k'th largest element in a list of quantum
 quantum_t quantum_qselect(quantum_t *v, size_t len, size_t k);
 
+//RGB pixel type
 typedef struct
 {
     quantum_t red, green, blue;
 } pixel_t;
 
+/*
+ * Image Type
+ * 
+ * Images are only created in dynamic memory (not on the stack).
+ * Stores the image data as a flexible array member.
+ */
 typedef struct
 {
-    size_t w;
-    size_t h;
+    size_t w; //width
+    size_t h; //height
     pixel_t px[];
 } image_t;
 
+//Create new black image of given size
 image_t* image_new(size_t w, size_t h);
+
+//create new image by copying from
 image_t* image_new_copy(const image_t* from);
+
+//will copy src to dest if possible but may reallocate dest if the sizes do not match
 image_t* image_copy(image_t* restrict dest, image_t* restrict src);
+
+/*
+ * Creates a new image which is mapped to a temp file.
+ * The image can then be used like any other image.
+ * This allows algorithms like median to load data beyond
+ * the limits of physical memory.
+ */
 image_t* image_mmap_new(image_t* copy);
+
+//use this free function if memory was allocated with image_mmap_new
 void image_mmap_free(image_t* img);
+
+//use this free for all other memory
 void image_free(image_t*);
+
+//bilinear interpolation
 pixel_t image_interpolate(image_t* img, float x, float y);
+
+//subtract dark from img
 void image_subtract_dark(image_t* img, image_t* dark);
+
+//add a scaler value to each pixel
 void image_add_scaler(image_t* img, float r, float g, float b);
+
+//multiply each pixel by a scaler
 void image_mul_scaler(image_t* img, float r, float g, float b);
+
+//add a scaler to shift the image median to med (used for background calibration)
 int image_normalize_median(image_t* img, pixel_t med);
+
+//add a scaler to shift the image mean to mean
 void image_normalize_mean(image_t* img, pixel_t mean);
+
+//compute average pixel values in image
 pixel_t image_mean(image_t* img);
+
+//compute median (may fail due to memory allocations)
 int image_median(image_t* img, pixel_t* med);
+
+//write 16bit RGB ppm to file stream
 int image_write_ppm(image_t* img, FILE* f);
-image_t* image_new_ppm(FILE* f);
+
+//create image from pnm file
+image_t* image_new_pnm(FILE* f);
+
+//utility function to display image (debugging only)
 int image_display(image_t* img);
 
 
-
+/*
+ * Data structure to store flat field information.
+ * The data in an image can be multiplied by the 
+ * corresponding multipliers to even out gain
+ * on the different pixels.
+ */
 typedef struct
 {
     size_t w;
@@ -112,26 +169,57 @@ typedef struct
     float_t* blue_multiplier;
 } flat_t;
 
+//create flat from flat frame
 flat_t* flat_new(image_t* flat_image);
 void flat_free(flat_t* flat);
+//apply a flat to an image
 void flat_apply(flat_t* flat, image_t* img);
 
+//stores the information on a star
 typedef struct
 {
+    //lum is the luminosity of a star
     float x, y, lum;
 } star_t;
 
+//list of stars stored a flexible array member
 typedef struct
 {
     size_t size;
     star_t stars[];
 } stars_t;
 
+//distance squared between two stars
 float star_dist2(star_t s1, star_t s2);
+
+//reversed compare of star luminosity
 int compare_star_lum_reversed(const void* a, const void* b);
+
+/*
+ * Maps all stars / points in an image.
+ * A point is any group of connected pixels
+ * which are above detection_percentile.  
+ * 
+ * Returns a stars_t with the stars sorted from brightest to dimmest.
+ * Most of the dimmer stars will be noise which is why only the first
+ * couple hundred are considered for matching.
+ */
 stars_t* stars_map(image_t* img, float detection_percentile);
 void stars_free(stars_t* st);
 
+/*
+ * The matcher works by finding triangles of the same dimensions.
+ * triangle_t is a set of three stars.
+ * smax is the star which has the two longest sides.
+ * smid is the side which connects the shortest and second shortest sides
+ * smin is the star which connects to the two shortest sides.
+ * 
+ * emax, emid, and emin are the edge lengths
+ * 
+ * smax <--emax--> smid
+ * smax <--emid--> smin
+ * smid <--emin--> smin
+ */
 typedef struct
 {
     star_t *smax, *smid, *smin;
@@ -139,52 +227,101 @@ typedef struct
 } triangle_t;
 
 triangle_t triangle_create(star_t* s1, star_t* s2, star_t* s3);
+
+//square sum of the edge lengths (its distance from the origin in triangle space)
 float triangle_mag2(triangle_t t);
 int compare_triangle_mag(const void* a, const void* b);
-triangle_t* find_best_match(triangle_t* t, triangle_t* tspace, size_t ntriangles, float net_side_sq_error_bound);
 
+/*
+ * Matcher is responsible for finding star matches between two star maps.
+ */
 typedef struct
 {
+    //triangles in the reference map
     triangle_t* triangles;
+    //stars in the reference map
     star_t* stars;
     size_t nstars;
     size_t ntriangles;
 } matcher_t;
 
+//pair of stars produced by the matcher
 typedef struct
 {
+    //domain_star is in the reference
+    //range_star is in the image being matched
     star_t domain_star, range_star;
+    
+    //the level of confidence of this match compared to other matches
     unsigned long votes;
 } star_pair_t;
 
+//list of matches from strongest to weakest
 typedef struct
 {
     size_t size;
     star_pair_t pairs[];
 } star_pairs_t;
 
+//create new matcher from a reference set of stars (uses only the first n stars to compute triangle space)
 matcher_t* matcher_new(stars_t* stars, size_t n);
 void matcher_free(matcher_t* m);
+
+/*
+ * Finds the closest match for a triangle in the triangle space.
+ * Since the triangle space is sorted it will only search a given
+ * range.  This is more for performance than accuracy since the matching
+ * algorithm is designed to handle errors.
+ */
 triangle_t* matcher_closest(matcher_t* matcher, triangle_t* t, float mag_search_bound);
+
+//matches stars baded on differential voting
 star_pairs_t* matcher_match_pairs(matcher_t* matcher, stars_t* stars, float search_bound);
 void star_pairs_free(star_pairs_t* sp);
 
+
+/*
+ * Affine transform matrix
+ * 
+ * |a b c|
+ * |d e f|
+ * |0 0 1|
+ */
 typedef struct
 {
     float a, b, c,
           d, e, f;
 } affine_t;
 
+// Uses only translation and rotation to compute best matrix to transfrom from domain to range.
 affine_t affine_align2(float domain_x1, float domain_y1, float domain_x2, float domain_y2,
         float range_x1, float range_y1, float range_x2, float range_y2);
+
+//apply the transform to the given coordinates
 void affine_apply(affine_t a, float* x, float* y);
+
+//compute the least squared error transform using the use_first_n pairs
 affine_t affine_align_pairs(star_pairs_t* pairs, size_t use_first_n);
 
+/*
+ * Accumulators are used to produce images which are the result of 
+ * a stacking process.
+ * 
+ * There are different types of accumulators. These "inherit" from
+ * the main accumulator structure.
+ */
 typedef struct accumulator
 {
+    //function called to add image
     int (*add)(struct accumulator*, image_t*);
+    
+    //apply transform and add image
     int (*add_transform)(struct accumulator*, image_t*, affine_t);
+    
+    //compute final result of accumulation
     image_t* (*result)(struct accumulator*);
+    
+    //destructor
     void (*free)(struct accumulator*);
 } accumulator_t;
 
@@ -198,25 +335,35 @@ typedef int (*accumulator_add_transform_t)(accumulator_t*, image_t*, affine_t);
 typedef image_t* (*accumulator_result_t)(accumulator_t*);
 typedef void (*accumulator_free_t)(accumulator_t*);
 
+/*
+ * Accumulator to compute mean with constant memory
+ */
 typedef struct
 {
+    //make sure it extends the base as the first member of the struct
     accumulator_t base;
     size_t w, h;
     uint32_t* data;
     uint16_t* count;
 } mean_accumulator_t;
 
+//virtual function overloads to be assigned to the base function pointers
 mean_accumulator_t* mean_accumulator_new(size_t w, size_t h);
 int mean_accumulator_add(mean_accumulator_t* accum, image_t* img);
 int mean_accumulator_add_transfrom(mean_accumulator_t* accum, image_t* img, affine_t t);
 image_t* mean_accumulator_result(mean_accumulator_t* accum);
 void mean_accumulator_free(mean_accumulator_t* accum);
 
+/*
+ * Computes the median of a series of images.
+ * The add function will mmap the images to a temp
+ * file so that they may be accessed later.
+ */
 typedef struct
 {
     accumulator_t base;
     size_t w, h;
-    bool make_temps;
+    bool make_temps; //if false median will simply store all images in memory
     affine_t* transforms;
     image_t** images;
     size_t count, alloc;
@@ -327,18 +474,10 @@ pixel_t image_interpolate(image_t* img, float x, float y)
     size_t w = img->w;
     size_t h = img->h;
     
-    if(x >= w || x < -1.0f || y >= h || y < -1.0f)
-        return (pixel_t){0, 0, 0};
-    
-    float x1 = floorf(x);
-    float x2 = floorf(x + 1.0f);
-    float y1 = floorf(y);
-    float y2 = floorf(y + 1.0f);
-    
-    pixel_t q11 = y1 < 0.0f || x1 < 0.0f ? (pixel_t){0, 0, 0} : img->px[img->w * (size_t)y1 + (size_t)x1];
-    pixel_t q12 = y2 >= h || x1 < 0.0f ? (pixel_t){0, 0, 0} : img->px[img->w * (size_t)y2 + (size_t)x1];
-    pixel_t q21 = y1 < 0.0f || x2 >= w ? (pixel_t){0, 0, 0} : img->px[img->w * (size_t)y1 + (size_t)x2];
-    pixel_t q22 = y2 >= h || x2 >= w ? (pixel_t){0, 0, 0} : img->px[img->w * (size_t)y2 + (size_t)x2];
+    size_t x1 = fmaxf(fminf(floorf(x), w - 1), 0);
+    size_t x2 = fmaxf(fminf(floorf(x + 1.0f), w - 1), 0);
+    size_t y1 = fmaxf(fminf(floorf(y), h - 1), 0);
+    size_t y2 = fmaxf(fminf(floorf(y + 1.0f), h - 1), 0);
 
     
     float c1 = (x2 - x) * (y2 - y);
@@ -346,6 +485,11 @@ pixel_t image_interpolate(image_t* img, float x, float y)
     float c3 = (x2 - x) * (y - y1);
     float c4 = (x - x1) * (y - y1);
     
+    pixel_t q11 = img->px[img->w * y1 + x1];
+    pixel_t q12 = img->px[img->w * y2 + x1];
+    pixel_t q21 = img->px[img->w * y1 + x2];
+    pixel_t q22 = img->px[img->w * y2 + x2];
+        
     return (pixel_t)
     {
         c1 * q11.red + c2 * q21.red + c3 * q12.red + c4 * q22.red,
@@ -449,7 +593,7 @@ int image_median(image_t* img, pixel_t* med)
     return SUCCESS;
 }
 
-image_t* image_new_ppm(FILE* f)
+image_t* image_new_pnm(FILE* f)
 {
     char id[3];
     if(fscanf(f, "%2s\n", id) != 1)
@@ -1680,7 +1824,7 @@ image_t* load(char* file)
     }
     
     
-    image_t* img = image_new_ppm(f);
+    image_t* img = image_new_pnm(f);
     stack_assert(img, "Failed to read image from file [%s]\n", file);
     
     if(script)
